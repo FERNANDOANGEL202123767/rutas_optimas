@@ -10,7 +10,7 @@ import json
 app = Flask(__name__)
 
 # Tu API Key de Google Maps
-API_KEY = "AIzaSyBvQEy2Hkj_mX3-IH0o7mUR9IVB56vn3Cw"
+API_KEY = "GOGLE_API"
 
 ESTADOS = {
     "Mexico": [23.634501, -102.552784], 
