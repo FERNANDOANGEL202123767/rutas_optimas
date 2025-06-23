@@ -5,10 +5,12 @@ import random
 import math
 import heapq
 import os
+import json
 
 app = Flask(__name__)
 
-API_KEY = "AIzaSyDytpSLPygjIvXWahgD6BABOeMx6VUTQqU"
+# Tu API Key de Google Maps
+API_KEY = "AIzaSyBvQEy2Hkj_mX3-IH0o7mUR9IVB56vn3Cw"
 
 ESTADOS = {
     "Mexico": [23.634501, -102.552784], 
@@ -19,7 +21,7 @@ ESTADOS = {
     "Michoacan": [19.5665192, -101.7068294], 
     "Morelos": [18.6813049, -99.1013498], 
     "Chihuahua": [28.6433753, -106.0587908], 
-    "CDMX": [19.4326077, -99.133208], 
+    "Ciudad de Mexico": [19.4326077, -99.133208], 
     "Nayarit": [21.7513844, -104.8454619], 
     "Guanajuato": [21.0190145, -101.2573586],
     "Guerrero": [17.4391926, -99.54509739999999], 
@@ -46,63 +48,112 @@ ESTADOS = {
     "Tijuana": [32.5149469, -117.0382471]
 }
 
+def calcular_distancia_haversine(lat1, lon1, lat2, lon2):
+    """Calcula la distancia entre dos puntos usando la fórmula de Haversine"""
+    R = 6371  # Radio de la Tierra en km
+    
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    
+    return R * c
+
 def obtener_ruta(partida, destino, api_key):
-    origin = partida.replace(" ", "+")
-    destination = destino.replace(" ", "+")
+    """Obtiene la ruta usando Google Maps API"""
+    partida_coords = ESTADOS.get(partida)
+    destino_coords = ESTADOS.get(destino)
+    
+    if not partida_coords or not destino_coords:
+        return None, None, None, None
+    
+    origin = f"{partida_coords[0]},{partida_coords[1]}"
+    destination = f"{destino_coords[0]},{destino_coords[1]}"
     
     url = f"https://maps.googleapis.com/maps/api/directions/json?origin={origin}&destination={destination}&key={api_key}"
-    response = requests.get(url)
-    data = response.json()
+    
+    try:
+        response = requests.get(url)
+        data = response.json()
 
-    if data["status"] == "OK" and "routes" in data and len(data["routes"]) > 0:
-        route = data["routes"][0]["legs"][0]
-        ruta_nombres = [step["html_instructions"] for step in route["steps"]]
-        ruta = " → ".join(ruta_nombres)
-        distancia = route["distance"]["text"]
-        distancia_valor = route["distance"]["value"] / 1000
+        if data["status"] == "OK" and "routes" in data and len(data["routes"]) > 0:
+            route = data["routes"][0]["legs"][0]
+            ruta_nombres = [step.get("html_instructions", "Paso") for step in route["steps"]]
+            ruta = " → ".join(ruta_nombres)
+            distancia = route["distance"]["text"]
+            distancia_valor = route["distance"]["value"] / 1000
 
-        return ruta, distancia, distancia_valor, data
+            return ruta, distancia, distancia_valor, data
+        else:
+            # Si la API falla, usar cálculo directo
+            distancia_km = calcular_distancia_haversine(
+                partida_coords[0], partida_coords[1],
+                destino_coords[0], destino_coords[1]
+            )
+            return f"Ruta directa de {partida} a {destino}", f"{distancia_km:.2f} km", distancia_km, None
+    except Exception as e:
+        print(f"Error en API: {e}")
+        # Fallback a cálculo directo
+        distancia_km = calcular_distancia_haversine(
+            partida_coords[0], partida_coords[1],
+            destino_coords[0], destino_coords[1]
+        )
+        return f"Ruta directa de {partida} a {destino}", f"{distancia_km:.2f} km", distancia_km, None
+
+def obtener_coordenadas(data, partida, destino):
+    """Obtiene las coordenadas de la ruta"""
+    if data and "routes" in data:
+        coordenadas = []
+        for step in data["routes"][0]["legs"][0]["steps"]:
+            lat, lng = step["start_location"]["lat"], step["start_location"]["lng"]
+            coordenadas.append([lat, lng])
+        # Agregar el punto final
+        lat, lng = data["routes"][0]["legs"][0]["steps"][-1]["end_location"]["lat"], data["routes"][0]["legs"][0]["steps"][-1]["end_location"]["lng"]
+        coordenadas.append([lat, lng])
+        return coordenadas
     else:
-        return None, None, None, None
+        # Si no hay datos de la API, usar coordenadas directas
+        return [ESTADOS[partida], ESTADOS[destino]]
 
-def obtener_coordenadas(data):
-    coordenadas = []
-    for step in data["routes"][0]["legs"][0]["steps"]:
-        lat, lng = step["start_location"]["lat"], step["start_location"]["lng"]
-        coordenadas.append((lat, lng))
-    lat, lng = data["routes"][0]["legs"][0]["steps"][-1]["end_location"]["lat"], data["routes"][0]["legs"][0]["steps"][-1]["end_location"]["lng"]
-    coordenadas.append((lat, lng))
-    return coordenadas
+def construir_grafo_estados():
+    """Construye un grafo con todos los estados y sus distancias"""
+    grafo = {}
+    estados_lista = list(ESTADOS.keys())
+    
+    for i, estado1 in enumerate(estados_lista):
+        grafo[estado1] = {}
+        coords1 = ESTADOS[estado1]
+        
+        for j, estado2 in enumerate(estados_lista):
+            if i != j:
+                coords2 = ESTADOS[estado2]
+                distancia = calcular_distancia_haversine(
+                    coords1[0], coords1[1], coords2[0], coords2[1]
+                )
+                grafo[estado1][estado2] = distancia
+    
+    return grafo
 
-def dibujar_ruta_en_mapa(partida, destino, coordenadas):
-    mapa = folium.Map(location=coordenadas[0], zoom_start=10)
-    folium.Marker(coordenadas[0], popup="Inicio", icon=folium.Icon(color='red')).add_to(mapa)
-    folium.Marker(coordenadas[-1], popup="Destino", icon=folium.Icon(color='green')).add_to(mapa)
-    folium.PolyLine(locations=coordenadas, color='blue').add_to(mapa)
-    ruta_html_path = os.path.join("static", "ruta_interactiva.html")
-    mapa.save(ruta_html_path)
-    print("Se ha creado un archivo 'ruta_interactiva.html' con el mapa interactivo.")
-
-def calcular_distancia(coordenadas):
-    total_distance = 0
-    for i in range(len(coordenadas) - 1):
-        lat1, lng1 = coordenadas[i]
-        lat2, lng2 = coordenadas[i + 1]
-        distance = math.sqrt((lat2 - lat1) ** 2 + (lng2 - lng1) ** 2)
-        total_distance += distance
-    return total_distance
-
-def dijkstra(graph, initial):
+def dijkstra(graph, start, end):
+    """Implementación del algoritmo de Dijkstra"""
     distances = {node: float('infinity') for node in graph}
-    distances[initial] = 0
-    priority_queue = [(0, initial)]
+    distances[start] = 0
+    priority_queue = [(0, start)]
     previous_nodes = {node: None for node in graph}
+    visited = set()
 
     while priority_queue:
         current_distance, current_node = heapq.heappop(priority_queue)
-
-        if current_distance > distances[current_node]:
+        
+        if current_node in visited:
             continue
+            
+        visited.add(current_node)
+
+        if current_node == end:
+            break
 
         for neighbor, weight in graph.get(current_node, {}).items():
             distance = current_distance + weight
@@ -112,94 +163,164 @@ def dijkstra(graph, initial):
                 previous_nodes[neighbor] = current_node
                 heapq.heappush(priority_queue, (distance, neighbor))
 
+    # Reconstruir el camino
     path = []
-    current = max(distances, key=distances.get)
+    current = end
     while current is not None:
         path.append(current)
         current = previous_nodes[current]
     path.reverse()
-    return path, distances
+    
+    return path, distances.get(end, float('infinity'))
 
-def busqueda_tabu(graph, start, end, tabu_size=10, max_iter=100):
-    current_solution = [start]
-    best_solution = current_solution[:]
-    tabu_list = []
-
-    for _ in range(max_iter):
-        neighborhood = []
-        for node in graph[current_solution[-1]]:
-            if node not in tabu_list:
-                neighborhood.append(node)
+def algoritmo_genetico(graph, start, end, population_size=50, generations=100):
+    """Algoritmo genético simplificado para encontrar rutas"""
+    estados = list(graph.keys())
+    
+    def crear_individuo():
+        # Crear una ruta que incluya start y end
+        otros_estados = [e for e in estados if e not in [start, end]]
+        # Seleccionar algunos estados intermedios aleatoriamente
+        num_intermedios = random.randint(0, min(3, len(otros_estados)))
+        intermedios = random.sample(otros_estados, num_intermedios)
+        return [start] + intermedios + [end]
+    
+    def calcular_fitness(individuo):
+        distancia_total = 0
+        for i in range(len(individuo) - 1):
+            distancia_total += graph[individuo[i]].get(individuo[i+1], float('infinity'))
+        return distancia_total
+    
+    # Inicializar población
+    poblacion = [crear_individuo() for _ in range(population_size)]
+    
+    mejor_individuo = min(poblacion, key=calcular_fitness)
+    mejor_distancia = calcular_fitness(mejor_individuo)
+    
+    for generacion in range(generations):
+        # Selección y cruce simple
+        nueva_poblacion = []
         
-        if not neighborhood:
-            break
+        for _ in range(population_size):
+            # Seleccionar dos padres aleatorios
+            padre1 = random.choice(poblacion)
+            padre2 = random.choice(poblacion)
+            
+            # Cruce simple: tomar elementos únicos de ambos padres
+            hijo = [start]
+            intermedios = []
+            
+            for estado in padre1[1:-1] + padre2[1:-1]:
+                if estado not in intermedios and estado != start and estado != end:
+                    intermedios.append(estado)
+            
+            # Limitar número de intermedios
+            if len(intermedios) > 3:
+                intermedios = random.sample(intermedios, 3)
+            
+            hijo.extend(intermedios)
+            hijo.append(end)
+            
+            # Mutación: cambiar algunos intermedios
+            if random.random() < 0.1 and len(hijo) > 2:
+                otros_estados = [e for e in estados if e not in hijo]
+                if otros_estados:
+                    idx = random.randint(1, len(hijo) - 2)
+                    hijo[idx] = random.choice(otros_estados)
+            
+            nueva_poblacion.append(hijo)
+        
+        poblacion = nueva_poblacion
+        
+        # Actualizar mejor solución
+        candidato = min(poblacion, key=calcular_fitness)
+        candidato_distancia = calcular_fitness(candidato)
+        
+        if candidato_distancia < mejor_distancia:
+            mejor_individuo = candidato
+            mejor_distancia = candidato_distancia
+    
+    return mejor_individuo, mejor_distancia
 
-        next_node = random.choice(neighborhood)
-        current_solution.append(next_node)
-
-        if next_node == end:
-            best_solution = current_solution[:]
-            break
-
-        tabu_list.append(next_node)
-        if len(tabu_list) > tabu_size:
-            tabu_list.pop(0)
-
-    return best_solution
-
-def crossover(parent1, parent2):
-    if len(parent1) < 2 or len(parent2) < 2:
-        return parent1, parent2
-    midpoint = len(parent1) // 2
-    child1 = parent1[:midpoint] + parent2[midpoint:]
-    child2 = parent2[:midpoint] + parent1[midpoint:]
-    return child1, child2
-
-def mutate(individual):
-    if len(individual) < 2:
-        return individual
-    idx1, idx2 = random.sample(range(len(individual)), 2)
-    individual[idx1], idx2 = individual[idx2], individual[idx1]
-    return individual
-
-def algoritmo_genetico_mejorado(graph, start, end, population_size=100, generations=500, crossover_rate=0.8, mutation_rate=0.02, elitism=True):
-    population = [[start] + random.sample(list(graph.keys()), len(graph) - 2) + [end] for _ in range(population_size)]
-
-    def fitness(individual):
-        return sum(graph[individual[i]].get(individual[i+1], float('infinity')) for i in range(len(individual) - 1))
-
-    best_individual = min(population, key=fitness)
-    best_fitness = fitness(best_individual)
-
-    for generation in range(generations):
-        new_population = []
-
-        for _ in range(population_size // 2):
-            parent1, parent2 = random.sample(population, 2)
-            if random.random() < crossover_rate:
-                child1, child2 = crossover(parent1, parent2)
-            else:
-                child1, child2 = parent1, parent2
-
-            if random.random() < mutation_rate:
-                child1 = mutate(child1)
-            if random.random() < mutation_rate:
-                child2 = mutate(child2)
-
-            new_population.extend([child1, child2])
-
-        if elitism:
-            new_population.append(best_individual)
-
-        population = new_population
-        current_best = min(population, key=fitness)
-        current_best_fitness = fitness(current_best)
-
-        if current_best_fitness < best_fitness:
-            best_fitness = current_best_fitness
-            best_individual = current_best
-
-    return best_individual, best_fitness
+def dibujar_mapa_con_algoritmos(partida, destino, coordenadas, dijkstra_result, genetico_result):
+    """Crea un mapa interactivo con las rutas de diferentes algoritmos"""
+    # Usar coordenadas de inicio para centrar el mapa
+    centro = coordenadas[0] if coordenadas else ESTADOS[partida]
+    mapa = folium.Map(location=centro, zoom_start=6)
+    
+    # Marcadores de inicio y fin
+    folium.Marker(
+        ESTADOS[partida], 
+        popup=f"Inicio: {partida}", 
+        icon=folium.Icon(color='red', icon='play')
+    ).add_to(mapa)
+    
+    folium.Marker(
+        ESTADOS[destino], 
+        popup=f"Destino: {destino}", 
+        icon=folium.Icon(color='green', icon='stop')
+    ).add_to(mapa)
+    
+    # Ruta original (si existe)
+    if len(coordenadas) > 2:
+        folium.PolyLine(
+            locations=coordenadas, 
+            color='blue', 
+            weight=5, 
+            opacity=0.7,
+            popup="Ruta Google Maps"
+        ).add_to(mapa)
+    
+    # Ruta Dijkstra
+    if dijkstra_result and len(dijkstra_result) > 1:
+        dijkstra_coords = [ESTADOS[estado] for estado in dijkstra_result]
+        folium.PolyLine(
+            locations=dijkstra_coords, 
+            color='red', 
+            weight=3, 
+            opacity=0.8,
+            popup="Ruta Dijkstra",
+            dash_array='10,5'
+        ).add_to(mapa)
+        
+        # Marcadores para estados intermedios de Dijkstra
+        for i, estado in enumerate(dijkstra_result[1:-1], 1):
+            folium.Marker(
+                ESTADOS[estado],
+                popup=f"Dijkstra: {estado} (Paso {i})",
+                icon=folium.Icon(color='red', icon='info-sign', prefix='glyphicon')
+            ).add_to(mapa)
+    
+    # Ruta Algoritmo Genético
+    if genetico_result and len(genetico_result) > 1:
+        genetico_coords = [ESTADOS[estado] for estado in genetico_result]
+        folium.PolyLine(
+            locations=genetico_coords, 
+            color='purple', 
+            weight=3, 
+            opacity=0.8,
+            popup="Ruta Algoritmo Genético",
+            dash_array='5,10'
+        ).add_to(mapa)
+        
+        # Marcadores para estados intermedios del Algoritmo Genético
+        for i, estado in enumerate(genetico_result[1:-1], 1):
+            folium.Marker(
+                ESTADOS[estado],
+                popup=f"Genético: {estado} (Paso {i})",
+                icon=folium.Icon(color='purple', icon='info-sign', prefix='glyphicon')
+            ).add_to(mapa)
+    
+    # Guardar mapa
+    static_dir = os.path.join(app.root_path, 'static')
+    if not os.path.exists(static_dir):
+        os.makedirs(static_dir)
+    
+    ruta_html_path = os.path.join(static_dir, "ruta_interactiva.html")
+    mapa.save(ruta_html_path)
+    print("Mapa guardado en:", ruta_html_path)
+    
+    return ruta_html_path
 
 @app.route('/')
 def index():
@@ -207,64 +328,83 @@ def index():
 
 @app.route('/ruta', methods=['POST'])
 def calcular_ruta():
-    data = request.json
-    partida = data['partida']
-    destino = data['destino']
+    try:
+        data = request.json
+        partida = data.get('partida')
+        destino = data.get('destino')
 
-    print("Partida:", partida)
-    print("Destino:", destino)
+        if not partida or not destino:
+            return jsonify({'error': 'Partida y destino son requeridos'}), 400
 
-    ruta, distancia, distancia_valor, datos_ruta = obtener_ruta(partida, destino, API_KEY)
+        if partida == destino:
+            return jsonify({'error': 'Partida y destino no pueden ser iguales'}), 400
 
-    if ruta is not None:
-        coordenadas = obtener_coordenadas(datos_ruta)
-        dibujar_ruta_en_mapa(partida, destino, coordenadas)
+        print(f"Calculando ruta de {partida} a {destino}")
 
-        grafo = construir_grafo(coordenadas)
+        # Obtener ruta de Google Maps
+        ruta, distancia, distancia_valor, datos_ruta = obtener_ruta(partida, destino, API_KEY)
+        
+        if ruta is None:
+            return jsonify({'error': 'No se pudo calcular la ruta'}), 400
 
-        dijkstra_result, _ = dijkstra(grafo, 0)
-        tabu_result = busqueda_tabu(grafo, 0, len(coordenadas) - 1)
-        genetico_result, _ = algoritmo_genetico_mejorado(grafo, 0, len(coordenadas) - 1)
-
-        dijkstra_distancia = calcular_distancia_coordenadas(coordenadas, dijkstra_result)
-        tabu_distancia = calcular_distancia_coordenadas(coordenadas, tabu_result)
-        genetico_distancia = calcular_distancia_coordenadas(coordenadas, genetico_result)
-
-        rutas = [
-            {"nombre": "Dijkstra", "distancia": dijkstra_distancia, "resultados": dijkstra_result},
-            {"nombre": "Búsqueda Tabú", "distancia": tabu_distancia, "resultados": tabu_result},
-            {"nombre": "Algoritmo Genético", "distancia": genetico_distancia, "resultados": genetico_result}
+        # Obtener coordenadas
+        coordenadas = obtener_coordenadas(datos_ruta, partida, destino)
+        
+        # Construir grafo de estados
+        grafo = construir_grafo_estados()
+        
+        # Ejecutar algoritmos
+        dijkstra_result, dijkstra_distancia = dijkstra(grafo, partida, destino)
+        genetico_result, genetico_distancia = algoritmo_genetico(grafo, partida, destino)
+        
+        # Crear mapa
+        dibujar_mapa_con_algoritmos(partida, destino, coordenadas, dijkstra_result, genetico_result)
+        
+        # Determinar el mejor algoritmo
+        algoritmos = [
+            {
+                "nombre": "Dijkstra", 
+                "distancia": dijkstra_distancia, 
+                "ruta": dijkstra_result,
+                "estados_count": len(dijkstra_result)
+            },
+            {
+                "nombre": "Algoritmo Genético", 
+                "distancia": genetico_distancia, 
+                "ruta": genetico_result,
+                "estados_count": len(genetico_result)
+            }
         ]
-        ruta_optima = min(rutas, key=lambda x: x["distancia"])
-
-        return jsonify({
+        
+        mejor_algoritmo = min(algoritmos, key=lambda x: x["distancia"])
+        
+        response = {
             'ruta': ruta,
             'distancia': distancia,
-            'algoritmo_optimo': ruta_optima
-        })
-    else:
-        return jsonify({'error': 'No se encontró una ruta válida para los destinos seleccionados.'}), 400
-
-def construir_grafo(coordenadas):
-    graph = {}
-    for i, (lat1, lng1) in enumerate(coordenadas):
-        graph[i] = {}
-        for j, (lat2, lng2) in enumerate(coordenadas):
-            if i != j:
-                graph[i][j] = math.sqrt((lat2 - lat1) ** 2 + (lng2 - lng1) ** 2)
-    return graph
-
-def calcular_distancia_coordenadas(coordenadas, ruta):
-    distancia = 0
-    for i in range(len(ruta) - 1):
-        lat1, lng1 = coordenadas[ruta[i]]
-        lat2, lng2 = coordenadas[ruta[i + 1]]
-        distancia += math.sqrt((lat2 - lat1) ** 2 + (lng2 - lng1) ** 2)
-    return distancia
+            'algoritmos': algoritmos,
+            'mejor_algoritmo': mejor_algoritmo,
+            'coordenadas': coordenadas
+        }
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        print(f"Error en calcular_ruta: {str(e)}")
+        return jsonify({'error': f'Error interno del servidor: {str(e)}'}), 500
 
 @app.route('/static/<path:filename>')
 def custom_static(filename):
     return send_from_directory('static', filename)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Crear directorio static si no existe
+    static_dir = os.path.join(app.root_path, 'static')
+    if not os.path.exists(static_dir):
+        os.makedirs(static_dir)
+    
+    # Crear directorio templates si no existe
+    templates_dir = os.path.join(app.root_path, 'templates')
+    if not os.path.exists(templates_dir):
+        os.makedirs(templates_dir)
+    
+    app.run(debug=True, host='0.0.0.0', port=5000)
